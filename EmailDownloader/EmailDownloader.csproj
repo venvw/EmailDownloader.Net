@@ -73,6 +73,7 @@
       <DependentUpon>App.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Models\Debug.cs" />
     <Compile Include="Models\SearchConditionAdapter.cs" />
     <Compile Include="Models\WindowAccessor.cs" />
     <Compile Include="ViewModels\MainViewModel.cs" />

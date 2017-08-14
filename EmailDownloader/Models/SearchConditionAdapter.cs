@@ -66,7 +66,7 @@ namespace EmailDownloader.Models
 
                 paramsInfo.Add(p);
             }
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(this.ParamEditors)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ParamEditors)));
         }
 
         public object[] GetValues()

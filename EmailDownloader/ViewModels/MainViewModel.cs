@@ -1,40 +1,61 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
-using System.Text;
+using System.Net.Mail;
 using System.Reflection;
 using System.Threading.Tasks;
-using DevExpress.Mvvm;
-using S22.Imap;
 using System.Windows.Controls;
+using DevExpress.Mvvm;
 using EmailDownloader.Models;
 using MahApps.Metro.Controls;
 using MahApps.Metro.Controls.Dialogs;
-using System.Collections.ObjectModel;
-using System.Net.Mail;
-using System.IO;
-using System.Diagnostics;
+using S22.Imap;
+using System.Windows;
+using MahApps.Metro;
 
 namespace EmailDownloader.ViewModels
 {
     internal sealed class MainViewModel : ViewModelBase
     {
         private ImapClient imap;
-        private string savePattern;
 
         public MainViewModel()
         {
-            savePattern = File.ReadAllText("savePattern.txt");
-            InitialDefaultValues();
+            InitDefaultValues();
         }
-        private void InitialDefaultValues()
+
+        private void InitDefaultValues()
         {
             Username = "@gmail.com";
             Hostname = "imap.gmail.com";
             Port = 993;
             Ssl = true;
+            selectedConditionAdapter =
+                new SearchConditionAdapter(SearchConditionGenerateMethods[SelectedConditionIndex]);
+        }
 
-            selectedConditionAdapter = new SearchConditionAdapter(SearchConditionGenerateMethods[SelectedConditionIndex]);
+        private void SetAppThemeByHostname()
+        {
+            string accent = "BaseLight";
+            switch (hostname)
+            {
+                case "imap.gmail.com":
+                    accent = "Red";
+                    break;
+                case "imap-mail.outlook.com":
+                    accent = "Cobalt";
+                    break;
+                case "imap.zoho.com":
+                    accent = "Steel";
+                    break;
+                case "imap.yandex.ru":
+                    accent = "Red";
+                    break;
+            }
+            ThemeManager.ChangeAppStyle(Application.Current,
+              ThemeManager.GetAccent(accent), ThemeManager.GetAppTheme("BaseLight"));
         }
 
         #region Authorization
@@ -47,6 +68,9 @@ namespace EmailDownloader.ViewModels
             get => username;
             set
             {
+                if (username != null && username.Equals(value))
+                    return;
+
                 username = value;
                 RaisePropertyChanged();
             }
@@ -58,10 +82,23 @@ namespace EmailDownloader.ViewModels
             get => hostname;
             set
             {
+                if (hostname != null && hostname.Equals(value))
+                    return;
+
                 hostname = value;
                 RaisePropertyChanged();
+
+                SetAppThemeByHostname();
             }
         }
+
+        public ObservableCollection<string> HostnameDefault => new ObservableCollection<string>
+        {
+            "imap.gmail.com",
+            "imap-mail.outlook.com",
+            "imap.zoho.com",
+            "imap.yandex.ru"
+        };
 
         private int port;
         public int Port
@@ -88,6 +125,7 @@ namespace EmailDownloader.ViewModels
         public AsyncCommand<PasswordBox> AuthCommand => 
             new AsyncCommand<PasswordBox>((PasswordBox passwordPanel) => AuthAsync(passwordPanel.Password),
             (PasswordBox passwordPanel) => MayAuth);
+
         private async Task AuthAsync(string password)
         {
             var progress = await ShowProgressAsync("Authentication", "Please wait...");
@@ -123,6 +161,7 @@ namespace EmailDownloader.ViewModels
                 await ShowMessageAsync("Authentication Timeout", "Six seconds passed but still no response");
             }
         }
+
         private Task InitializeImapTask(string hostname, int port,
             string username, string password, AuthMethod auth, bool ssl)
         {
@@ -192,8 +231,8 @@ namespace EmailDownloader.ViewModels
                 await Task.Run(() =>
                  {
                      var condition = selectedConditionAdapter.Method.Invoke(null, selectedConditionAdapter.GetValues()) as SearchCondition;
-                     messagesToDownload = imap.Search(condition);
-                     MessagesToDownloadCount = messagesToDownload.Count();
+                     foundMessages = imap.Search(condition);
+                     FoundMessagesCount = foundMessages.Count();
                  });
             }
             catch(Exception e)
@@ -205,84 +244,151 @@ namespace EmailDownloader.ViewModels
         #endregion
 
         #region Download
-        private IEnumerable<uint> messagesToDownload;
+        private IEnumerable<uint> foundMessages;
 
-        private int messagesToDownloadCount;
-
-        public int MessagesToDownloadCount
+        private int foundMessagesCount;
+        public int FoundMessagesCount
         {
-            get => messagesToDownloadCount;
+            get => foundMessagesCount;
             set
             {
-                messagesToDownloadCount = value;
+                foundMessagesCount = value;
                 RaisePropertyChanged();
             }
         }
 
-        public AsyncCommand DownloadCommand => new AsyncCommand(() => DownloadAsync(), () => messagesToDownloadCount != 0 && Authed);
+        public AsyncCommand DownloadCommand => new AsyncCommand(() => DownloadAsync(), () => foundMessagesCount != 0 && Authed);
         private async Task DownloadAsync()
         {
-            ProgressDialogController progress = await ShowProgressAsync("Downloading", "Please wait...", true);
+            var progress = await ShowProgressAsync("Downloading", "Please wait...", true);
             int downloaded = 0;
             int errors = 0;
             try
             {
-                string path = NewPath();
+                string path = GenerateDirectoryForEmailMessages();
                 await Task.Run(() =>
                 {
-                    foreach (var uid in messagesToDownload)
+                    foreach (var uid in foundMessages)
                     {
                         if (progress.IsCanceled)
                             break;
 
                         try
                         {
-                            var message = imap.GetMessage(uid);
-                            string filePath = GenerateFilePath(downloaded, path, message);
-                            File.WriteAllText(filePath,
-                                string.Format(savePattern, 
-                                new object[] { message.From.Address, message.To.First(),
-                                    message.Date(), message.Subject, message.Body }));
+                            DownloadEmailMessage(downloaded, path, uid);
                         }
-                        catch
+                        catch(Exception e)
                         {
+                            Debug.Log(e);
                             errors++;
                             continue;
                         }
-                        downloaded = ReportProgress(progress, downloaded);
+                        downloaded++;
+                        ReportMessageDownloadProgress(progress, downloaded);
                     }
                 });
-                await ShowMessageAsync($"Downloading Complete ({downloaded}/{messagesToDownloadCount})",
+                await ShowMessageAsync($"Downloading Complete ({downloaded}/{foundMessagesCount})",
                     $"Emails saved to {path}{Environment.NewLine}Failed count: {errors}");
             }
             catch(Exception e)
             {
-                await ShowMessageAsync($"Downloading Failed ({downloaded}/{messagesToDownloadCount})", $"{e.Message}");
+                Debug.Log(e);
+                await ShowMessageAsync($"Downloading Failed ({downloaded}/{foundMessagesCount})", $"{e.Message}");
             }
             await progress.CloseAsync();
         }
 
-        private int ReportProgress(ProgressDialogController progress, int downloaded)
+        private void DownloadEmailMessage(int downloaded, string path, uint uid)
         {
-            downloaded++;
-            progress.SetProgress((double)downloaded / messagesToDownloadCount);
-            progress.SetMessage($"Please wait...({downloaded}/{messagesToDownloadCount})");
-            return downloaded;
+            using (var message = imap.GetMessage(uid))
+            {
+                string emailFolderPath = GenerateEmailMessageFolderPath(downloaded, path, message);
+
+                SaveMessageHeaders(message, emailFolderPath);
+                SaveMessageBody(message, emailFolderPath);
+                SaveMessageAttachments(message, emailFolderPath);
+                SaveMessageAlternativeViews(message, emailFolderPath);
+            }
         }
 
-        private static string GenerateFilePath(int downloaded, string path, MailMessage message)
+        private void SaveMessageAlternativeViews(MailMessage message, string emailFolderPath)
         {
-            var fileName = $"{downloaded}_{message.Subject}";
-            fileName = $"{new string(fileName.Take(30).ToArray())}.html";
+            if (message.AlternateViews.Count == 0)
+                return;
+
+            var avsPath = Directory.CreateDirectory(Path.Combine(emailFolderPath, "Alternative Views")).FullName;
+            int id = 1;
+            foreach (var av in message.AlternateViews)
+            {
+                var e = av.ContentType.MediaType.Split(new char[] { '/' })[1];
+                var avPath = Path.Combine(avsPath, $"{id}.{e}");
+                using (var stream = File.Create(avPath))
+                {
+                    av.ContentStream.CopyTo(stream);
+                }
+                id++;
+            }
+        }
+
+        private void SaveMessageHeaders(MailMessage message, string emailFolderPath)
+        {
+            var headersPath = Path.Combine(emailFolderPath, "Headers.txt");
+            File.Create(headersPath).Close();
+
+            var headersLines = new List<string>();
+            for(int i = 0; i < message.Headers.Count; i++)
+            {
+                headersLines.Add($"{message.Headers.Keys[i]}: {message.Headers.GetValues(i).First()}");
+            }
+            File.WriteAllLines(headersPath, headersLines);
+        }
+
+        private void SaveMessageBody(MailMessage message, string emailFolderPath)
+        {
+            string body = message.Body;
+            var bodyPath = Path.Combine(emailFolderPath, "Body.html");
+
+            File.Create(bodyPath).Close();
+            File.WriteAllText(bodyPath, body);
+        }
+
+        private void SaveMessageAttachments(MailMessage message, string emailFolderPath)
+        {
+            if (message.Attachments.Count == 0)
+                return;
+
+            var attachmentsPath = Directory.CreateDirectory(Path.Combine(emailFolderPath, "Attachments")).FullName;
+            int id = 1;
+            foreach (var attachment in message.Attachments)
+            {
+                var attachmentPath = Path.Combine(attachmentsPath, $"{id}{Path.GetExtension(attachment.Name)}");
+                using (var stream = File.Create(attachmentPath))
+                {
+                    attachment.ContentStream.CopyTo(stream);
+                }
+                id++;
+            }
+        }
+
+        private void ReportMessageDownloadProgress(ProgressDialogController progress, int downloaded)
+        {
+            progress.SetProgress((double)downloaded / foundMessagesCount);
+            progress.SetMessage($"Please wait...({downloaded}/{foundMessagesCount})");
+        }
+
+        private string GenerateEmailMessageFolderPath(int downloaded, string path, MailMessage message)
+        {
+            var emailFolderName = $"{downloaded}_{message.Subject}";
+            emailFolderName = $"{new string(emailFolderName.Take(30).ToArray())}";
             foreach (char c in Path.GetInvalidFileNameChars())
-                fileName = fileName.Replace(c, '_');
-            var filePath = Path.Combine(path, fileName);
-            return filePath;
+            emailFolderName = emailFolderName.Replace(c, '_');
+            var emailFolderPath = Path.Combine(path, emailFolderName);
+            return Directory.CreateDirectory(emailFolderPath).FullName;
         }
 
-        private string NewPath()
+        private string GenerateDirectoryForEmailMessages()
         {
-            var path = Path.Combine(Environment.CurrentDirectory, $"{username}_{hostname}_{DateTime.Now.ToFileTime()}");
+            var path = Path.Combine(Environment.CurrentDirectory, $"{username}_{DateTime.Now.ToFileTime()}");
             foreach (char c in Path.GetInvalidPathChars())
                 path = path.Replace(c, '_');
             Directory.CreateDirectory(path);
